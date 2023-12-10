@@ -14,7 +14,7 @@ DATA_FILE = "bot_data.json"
 products = {}
 lock = asyncio.Lock()
 
-bot = Bot(token='6964654315:AAGVOL1ieWosmtHjMn1evqxwzExUBDpsOmA')
+bot = Bot(token='TOKEN')
 dp = Dispatcher(bot)
 
 # Load data from the JSON file on startup
