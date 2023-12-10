@@ -1,0 +1,212 @@
+import asyncio
+import json
+import os
+import time
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from selenium.common.exceptions import NoSuchElementException
+
+DATA_FILE = "bot_data.json"
+
+# Dictionary to store information about products for each chat
+products = {}
+lock = asyncio.Lock()
+
+bot = Bot(token='6964654315:AAGVOL1ieWosmtHjMn1evqxwzExUBDpsOmA')
+dp = Dispatcher(bot)
+
+# Load data from the JSON file on startup
+def load_data():
+    global products
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as file:
+            products = json.load(file)
+    #if not(products):
+        #os.remove ("bot_data.json")
+
+
+# Save data to the JSON file
+def save_data():
+    with open(DATA_FILE, 'w') as file:
+        json.dump(products, file, indent=2)
+
+# Load data on startup
+load_data()
+
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.reply('Привет! Отправь мне URL товара и минимальную скидку.')
+
+@dp.message_handler(commands=['add_product'])
+async def add_product(message: types.Message):
+    chat_id = message.chat.id
+    args = message.get_args().split()
+
+    if len(args) != 2:
+        await message.reply('Пример: /add_product <product_url> <min_discount_percentage>')
+        return
+
+    product_url, min_discount_str = args
+
+    # Check if the URL starts with "https://www.onlinetrade.ru"
+    if not product_url.startswith("https://www.onlinetrade.ru"):
+        await message.reply('Пожалуйста, отправьте корректную ссылку, начинающуюся с "https://www.onlinetrade.ru".')
+        return
+
+    # Check if min_discount is a valid float
+    try:
+        min_discount = float(min_discount_str)
+    except ValueError:
+        await message.reply('Пожалуйста, укажите корректное значение для минимальной скидки.')
+        return
+
+    # Check if the chat_id is already in the products dictionary
+    if chat_id not in products:
+        products[chat_id] = []
+
+    # Check if the product_url is already in the list for the chat_id
+    for product_info in products[chat_id]:
+        if product_info['url'] == product_url:
+            await message.reply(f'Товар уже добавлен: {product_url} с минимальной скидкой {min_discount}%')
+            return
+
+    # Add the product to the list
+    async with lock:
+        products[chat_id].append({'url': product_url, 'min_discount': min_discount, 'last_checked': 0, 'current_index': 0})
+
+    await message.reply(f'Товар добавлен: {product_url} с минимальной скидкой {min_discount}%')
+
+@dp.message_handler(commands=['remove_product'])
+async def remove_product(message: types.Message):
+    args = message.get_args().strip()
+
+    if not args:
+        await message.reply('Пример: /remove_product <product_url>')
+        return
+
+    removed = False  # Флаг для отслеживания, был ли товар удален
+
+    # Iterate through all chats in products
+    for chat_id, chat_products in products.items():
+        for product_info in chat_products:
+            if product_info['url'] == args:
+                chat_products.remove(product_info)
+                removed = True
+                break
+
+
+
+    if removed:
+        await message.reply(f'Товар удалён: {args}')
+    else:
+        await message.reply(f'Товар не найден: {args}')
+
+    # Save the updated data to the JSON file
+    save_data()
+
+
+
+
+
+
+
+
+async def check_discount(chat_id):
+    try:
+        # Use Selenium to scrape the product page
+        driver = webdriver.Chrome()  # You may need to adjust this path based on your system
+
+        # Combine products from the current session and those loaded from the file
+        all_products = products.get(chat_id, [])
+
+        for product_info in all_products:
+            product_url = product_info['url']
+            min_discount = product_info['min_discount']
+            last_checked = product_info['last_checked']
+            current_index = product_info['current_index']
+
+            current_time = time.time()
+            # Check if it's time to perform a new check (e.g., every 30 seconds)
+            if current_time - last_checked >= 30:
+                driver.get(product_url)
+                await asyncio.sleep(5)  # Allow time for the page to load (you may need to adjust this)
+
+                try:
+                    accept_button = driver.find_element(By.CLASS_NAME, "js__cookiePanel__button")
+                    accept_button.click()
+                except NoSuchElementException:
+                    pass  # Continue if the button is not found
+
+                # Select the dropdown by ID
+                sort_dropdown = driver.find_element(By.ID, "js__listingSort_ID")
+                sort_dropdown.click()
+
+                # Select the option by value
+                sort_by_discount_option = driver.find_element(By.CSS_SELECTOR, "option[value='discount']")
+                sort_by_discount_option.click()
+
+                await asyncio.sleep(2)  # Allow time for the page to update (you may need to adjust this)
+
+                # Extract relevant information (you may need to adapt this based on the specific page structure)
+                # For example, you might need to find elements by class, tag, etc.
+                products_ = driver.find_elements(By.CLASS_NAME, "indexGoods__item")
+
+                for i, product in enumerate(products_[current_index:]):
+                    buy_button = product.find_elements(By.XPATH, ".//a[@class='button button__orange js__ajaxExchange']")
+                    if not buy_button:
+                        continue  # Skip products without the "Купить" button
+
+                    title = product.find_element(By.CLASS_NAME, "indexGoods__item__name").text.strip()
+                    price = product.find_element(By.CLASS_NAME, "price.js__actualPrice").text.strip()
+                    link = product.find_element(By.CLASS_NAME, "indexGoods__item__image.js__indexGoods__item__image").get_attribute('href')
+                    old_price = product.find_element(By.CLASS_NAME, "gray").get_attribute("span")
+                    discount_tag = product.find_elements(By.CLASS_NAME, "mark.mark__discount")
+                    discount_tag = discount_tag[0].text
+                    cleaned_discount = discount_tag.replace('-', '').replace('%', '')
+                    discount_value = float(cleaned_discount)
+
+                    # Check if the product meets the minimum discount criteria
+                    if discount_value >= min_discount:
+                        message_text = f"Новое предложение!\nНазвание: {title}\nЦена: {price}\nСкидка: {discount_value}%\nСсылка: {link}"
+                        await bot.send_message(chat_id=chat_id, text=message_text)
+
+                        # Update the last_checked for the current product
+                        product_info['last_checked'] = current_time
+                        product_info['current_index'] = current_index + i + 1
+
+                        # Introduce a delay after sending each message
+                        await asyncio.sleep(30)
+
+                        break  # Stop at the first product that meets the criteria
+
+                else:
+                    await bot.send_message(chat_id=chat_id, text=f'Нет новых предложений по {product_url} со скидкой {min_discount}%. Извините!')
+
+    except Exception as e:
+        await bot.send_message(chat_id=chat_id, text=f'Error: {str(e)}')
+
+    finally:
+        if driver:
+            driver.quit()
+
+
+
+
+
+async def automatic_check_discount():
+    while True:
+        # Create a copy of the keys to avoid dictionary size change during iteration
+        for chat_id in list(products.keys()):
+            await check_discount(chat_id=chat_id)
+
+        save_data()
+        await asyncio.sleep(30)  # Adjust the sleep duration as needed
+
+
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.create_task(automatic_check_discount())
+    executor.start_polling(dp, skip_updates=True)
